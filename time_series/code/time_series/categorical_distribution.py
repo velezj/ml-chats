@@ -11,22 +11,49 @@ import numpy as np
 class cat_distibution( object ):
     def __init__( self, counts ):
         self.counts = counts
+        self.total = float(np.sum(counts.values()))
 
+    ##
+    # Returns the probability mass for a given domain value.
+    # (similar to the pdf but for discrete distributions)
+    def pmf( self, x ):
+        if x not in self.counts:
+            return 0.0
+        return self.counts[x] / self.total
+    
+
+    ##
+    # Returns the mode of the distribution.
+    # This returns a *set* of the domain with the
+    # mode since a distribution can have multiple modes
     def mode(self):
         if len(self.counts) < 1:
-            return None
-        best_k = self.counts.keys()[0]
-        best_c = self.counts[ best_k ]
+            return set([])
+        first_k = self.counts.keys()[0]
+        best_k = set([first_k])
+        best_c = self.counts[ first_k ]
         for k,c in self.counts.iteritems():
             if c > best_c:
-                best_k = k
+                best_k = set([k])
                 best_c = c
+            elif c == best_c:
+                best_k.add( k )
         return best_k
 
+    ##
+    # Returns the credible interval as the following:
+    # The interval around the mode which contains the given
+    # mass.
     def credible_interval( self, p ):
         mode_k = self.mode()
-        if mode_k is None:
+        if len(mode_k) == 0:
             return None
+
+        # Ok, if there are multiple modes, pick the *middle* one
+        if len(mode_k) > 1:
+            mode_k = sorted(mode_k)[ len(mode_k) / 2 ]
+        else:
+            mode_k = list(mode_k)[0]
 
         # ok, search around the mode
         ordered_k = sorted( self.counts.keys() )
