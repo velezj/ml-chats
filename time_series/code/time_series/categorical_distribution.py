@@ -19,6 +19,9 @@ class cat_distibution( object ):
         self.counts = counts
         self.total = float(np.sum(counts.values()))
 
+    def __str__(self):
+        return "CatDist({0})".format( self.counts )
+
     ##
     # Returns the probability mass for a given domain value.
     # (similar to the pdf but for discrete distributions)
