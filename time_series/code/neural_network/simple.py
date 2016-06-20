@@ -29,10 +29,10 @@ class SimpleScalarF_1Layer( object ):
         self.learning_rate = learning_rate
 
         # the hidden layer weights
-        self.V = np.random.random( size=(hidden_layer_size, 2 ) ) * init_weight_max_magnitude
+        self.V = ( np.random.random( size=(hidden_layer_size, 2 ) ) - 0.5 ) * 2 * init_weight_max_magnitude
 
         # the output layer weights
-        self.w = np.random.random( size=self.hidden_layer_size ) * init_weight_max_magnitude
+        self.w = ( np.random.random( size=self.hidden_layer_size ) - 0.5 ) * 2 * init_weight_max_magnitude
 
         # the number of epochs seen
         self.epoch = 0
@@ -198,6 +198,14 @@ def plot_fits( nn,
 def generate_hill_data(num_points=100):
     x = np.linspace( -10, 10, num_points )
     y = np.power( x, 2.0 )
+    y -= np.mean(y)
+    return zip( x, y )
+
+##=========================================================================
+
+def generate_periodic_data(num_points=100, period=10):
+    x = np.linspace( -10, 10, num_points )
+    y = np.sin( x * 2 * np.pi * period / num_points )
     y -= np.mean(y)
     return zip( x, y )
 
