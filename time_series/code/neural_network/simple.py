@@ -152,6 +152,35 @@ class SimpleScalarF_1Layer( object ):
             self.w[h_i] += self.learning_rate * (- d2 * z[h_i])
             self.V[h_i,:] += self.learning_rate * (- d1[h_i] * x)
 
+
+    def visualize_inputs_to_final_layer(self, data):
+
+        plt.figure()
+
+        xs = map(lambda o: o[0], data)
+
+        wzs = []
+        for x in xs:
+            x = np.array([x,1.0])
+            z = np.zeros( self.hidden_layer_size )
+            for h_i in xrange(self.hidden_layer_size):
+                z_i = np.dot( self.V[h_i,:], x )
+                z_i = scipy.special.expit( z_i )
+                z[ h_i ] = z_i
+            wzs.append( self.w * z )
+
+        wzs = np.asarray(wzs)
+
+        fig = plt.figure()
+        ax = fig.add_subplot(1,1,1)
+        for i in range(self.hidden_layer_size):
+            x = xs
+            y = wzs[:, i]
+            ax.plot( x, y, label="W_{0} * z_{0}".format( i ) )
+        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+
+
+
 ##=========================================================================
 
 def plot_fits( nn,
