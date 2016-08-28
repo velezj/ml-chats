@@ -6,6 +6,7 @@ import numpy as np
 import scipy
 import scipy.stats
 import itertools
+import operator
 
 
 ##===================================================================
@@ -27,9 +28,17 @@ class ConfigurationAgnosticSpoon( object ):
         self.mu = mu
         self.cov = cov
         self.noise_sigma = iid_noise_sigma
-        self._rv = scipy.stats.multivariate_normal(
-            mean = self.mu,
-            cov = self.cov )
+        try:
+            self._rv = scipy.stats.multivariate_normal(
+                mean = self.mu,
+                cov = self.cov )
+        except np.linalg.LinAlgError as le:
+            # probably have a singular matrix in the covariance, add
+            # some identity noise :-)
+            self.cov += ( np.eye( len(self.cov) ) * np.random.random( size=len(self.cov) ) * iid_noise_sigma )
+            self._rv = scipy.stats.multivariate_normal(
+                mean = self.mu,
+                cov = self.cov )            
         self._noise_rv = scipy.stats.norm(
             loc=0.0,
             scale=self.noise_sigma )
@@ -46,7 +55,7 @@ class ConfigurationAgnosticSpoon( object ):
     #
     # returns ( observations, configuration )
     # if n is None, returns ( single observation, configuration )
-    def sample_observations_from_single_configuration( n=None ):
+    def sample_observations_from_single_configuration( self, n=None ):
 
         num = n
         if n is None:
@@ -88,7 +97,7 @@ class FiniteConfigurationSpoon( object ):
     # Optionally, each configuration can have a weight to be treated as
     # the probability of the spoon being in that configuration
     def __init__( self, mu_covs, iid_noise_sigma, configuration_weight = None ):
-        n = len(mu_covs[0][0])
+        n = len(mu_covs)
         self.mu_covs = mu_covs
         self.noise_sigma = iid_noise_sigma
         self._noise_rv = scipy.stats.norm(
@@ -119,7 +128,7 @@ class FiniteConfigurationSpoon( object ):
     #
     # returns ( observations, configuration )
     # if n is None, returns ( single observation, configuration )
-    def sample_observations_from_single_configuration( n=None ):
+    def sample_observations_from_single_configuration( self, n=None ):
 
         num = n
         if n is None:
@@ -153,7 +162,7 @@ def fit_configuration_agnostic_spoon( data, noise_sigma=0.1 ):
     # we use the maximum likelihood estimator for the
     # single multivariate normal
     mu = np.mean( data, axis = 0 )
-    cov = np.cov( data, rowvar=1 )
+    cov = np.cov( data, rowvar=0 )
 
     return ConfigurationAgnosticSpoon(
         mu,
@@ -226,6 +235,9 @@ def fit_finite_configuration_spoon( data,
     configurations.append( init_configuration )
     crvs.append( init_rv )
     configurations_data.append( init_data )
+    logger.info( "Fit initial configuration using #{0} data: {1}".format(
+        initial_configuration_samples,
+        init_configuration ) )
 
     # ok, process the rest of the data
     for x in data[ initial_configuration_samples: ]:
@@ -244,6 +256,12 @@ def fit_finite_configuration_spoon( data,
         # the set of configurations to test against
         active_set = set(xrange(len(configurations)))
 
+        logger.info( "tracking #{0}: max lik={1} for conf {2}, prob={3}".format(
+            len(configurations),
+            np.max(liks),
+            ml_cid,
+            extrema_prob ) )
+
         # if the extrema probability is too low, make a new configuration
         updated_configuration = None
         updated_rv = None
@@ -259,6 +277,9 @@ def fit_finite_configuration_spoon( data,
             updated_data = np.array( [ x ] )
             updated_cid = len(configurations)
 
+            logger.info( "  trying new configuration: {0}".format(
+                updated_configuration ))
+
         else:
             
             # ok, make new configuration assuming we added this point
@@ -267,6 +288,10 @@ def fit_finite_configuration_spoon( data,
             updated_configuration, updated_rv = make_configuration( updated_data )
             active_set -= { ml_cid }
             updated_cid = ml_cid
+
+            logger.info( "  adding to ml configuration")
+
+        logger.info( "active set: {0}".format( active_set ) )
 
         # see if we have to join any of our configurations because they
         # are actually the same
@@ -279,6 +304,7 @@ def fit_finite_configuration_spoon( data,
                 configurations_data[ cid ],
                 updated_data )
             pvalues.append( ( cid, pvalue ) )
+        logger.info( "pvalues: {0}".format( pvalues ) )
 
         # calculate the bonferoni correction for multiple hypothesis testing
         # since we are actually testing against all previously tracked
@@ -289,11 +315,15 @@ def fit_finite_configuration_spoon( data,
         # do not have to merge with anything, otherwise we need to merge
         # with the highest p-value (since that is the multivariate
         # normal closest to ours)
-        min_cid, min_pvalue = sorted( pvalues, key=lambda (c,p): p )[0]
-        if min_pvalue > equal_pvalue_thresh_bonferoni:
+        min_cid = None
+        min_pvalue = -np.inf
+        if len(pvalues) > 0:
+            min_cid, min_pvalue = sorted( pvalues, key=lambda (c,p): p )[0]
+        if min_cid is not None and min_pvalue > equal_pvalue_thresh_bonferoni:
 
             # we are merging, find maximum p-value
             max_cid, max_pvalue = sorted( pvalues, key=lambda (c,p): p )[-1]
+            
 
             # merge
             new_data = np.vstack( [ configurations_data[ max_cid ],
@@ -308,20 +338,32 @@ def fit_finite_configuration_spoon( data,
                 del configurations[ updated_cid]
                 del configurations_data[ updated_cid]
                 del crvs[ updated_cid]
-                
 
-        else:
+            logger.info( "for datapoint: Merging {0} with {1}: pvalue {2} > {3}".format(
+                updated_cid,
+                max_cid,
+                min_pvalue,
+                equal_pvalue_thresh_bonferoni ) )
+
+
+        elif min_cid is not None and updated_cid >= len(configurations):
 
             # add new configuration
             configurations.append( updated_configuration )
             configurations_data.append( updated_data )
             crvs.append( updated_rv )
 
+            logger.info( "for datapoint: tracking new configuration" )
+
+        else:
+
+            logger.info( "for datapoint: updated ml configuration" )
+
     # return the configurations
     return FiniteConfigurationSpoon(
         configurations,
         noise_sigma,
-        configuration_weight = map(float,map(len,configuration_data)))
+        configuration_weight = map(float,map(len,configurations_data)))
 
 ##===================================================================
 ##===================================================================
@@ -339,7 +381,8 @@ def fit_finite_configuration_spoon( data,
 # The return value is a p-value to reject the HULL hypothesis
 def hypothesis_test_equal_multivariate_normal(
         data0,
-        data1 ):
+        data1,
+        EPS = 1.0e-5):
 
     # we will use Hotelling's T-Square Test for
     # equal multivariate normal means.
@@ -353,7 +396,7 @@ def hypothesis_test_equal_multivariate_normal(
     n1 = len(data1)
     num_vars = 1
     if hasattr( data0[0], '__len__' ):
-        num_vars = len( data[0] )
+        num_vars = len( data0[0] )
 
     # compute sample means
     mean0 = np.mean( data0, axis=0 )
@@ -365,21 +408,48 @@ def hypothesis_test_equal_multivariate_normal(
 
     # since we *assume* equal covariances, we use all the
     # data to compute an estimated covariance :-)
-    S = ( ( n0 - 1) * cov0 + ( n1 - 1 ) * cov1 ) / ( n0 + n1 - 2 )
-
+    if n0 == 1 and n1 == 1:
+        S = np.cov( np.vstack( [ data0, data1] ), rowvar=0 )
+    else:
+        S = ( ( n0 - 1) * cov0 + ( n1 - 1 ) * cov1 ) / ( n0 + n1 - 2 )
+    
     # the T statistic
-    delta = mean0 - mean1
-    Sinv = np.linalg.inv( S * ( 1.0/n0 + 1.0/n1 ) )
+    delta = (mean0 - mean1)
+    try:
+        Sinv = np.linalg.inv( S )
+    except np.linalg.LinAlgError as le:
+        # probabily S was wingular, add some noise
+        S += ( np.eye( S.shape[0] ) * np.random.random(size=S.shape[0]) * EPS )
+        Sinv = np.linalg.inv( S )
     T2 = np.dot( np.dot( delta, Sinv ),
                  delta )
+    T2 *= float( n0 * n1 ) / ( n0 + n1 )
+    T2 = np.abs( T2 )
 
     # form into F statistic
-    F = ( n0 + n1 - num_vars - 1 ) / ( num_vars * ( n0 + n1 - 2 ) ) * T2
+    if n0 + n1 - 2.0 > 0:
+        F = float( n0 + n1 - num_vars - 1.0 ) / ( num_vars * ( n0 + n1 - 2.0 ) ) * T2
+    else:
+        F = 0.0
 
     # ok, return the CDF of the F distribution defined from above
     # for the given value
-    survival = scipy.stats.f( num_vars, n0 + n1 - num_vars - 1 ).sf( F )
+    if n0 + n1 - num_vars - 1 > 0:
+        survival = scipy.stats.f( num_vars, n0 + n1 - num_vars - 1 ).sf( F )
+    else:
+        survival = 0.0
 
+    # make sure survival is finite
+    if not np.isfinite( survival ):
+        survival = 0.0
+    logger.info( "  delta: {0}, T2:{1}, F:{2}, surv:{3} n={4},{5}".format(
+        delta,
+        T2,
+        F,
+        survival,
+        n0,
+        n1) )
+    
     # return the survival rate for the given value (so how extreme the value is)
     # this is a p-value, so a return of < 0.05 means that we could reject
     # the NULL hypothesis that data came from same means since the chance
@@ -435,17 +505,17 @@ def _multivariate_normal_extrema_probability(
 def test_fit_algorithm(
         true_model,
         fit_algorithm,
-        num_configurations_to_simulate = 2,
+        num_configurations_samples = 10,
         num_samples_per_configuration = 20,
-        num_configurations_for_distribution_test = 2,
-        num_samples_for_distribution_test = 1000 ):
+        num_configurations_samples_for_distribution_test = 10,
+        num_samples_for_distribution_test = 30 ):
 
     # ok, first generate data from the true model
     data = []
-    for ci in xrange(num_configurations_to_simulate):
+    for ci in xrange(num_configurations_samples):
         cdata = true_model.sample_observations_from_single_configuration(
             n=num_samples_per_configuration)
-        data.extend( list(cdata) )
+        data.extend( list(cdata[0]) )
     data = np.array( data )
     
     # Ok, apply hte fit algorithm
@@ -454,17 +524,18 @@ def test_fit_algorithm(
     # generate samples to test fit versus true models
     true_data = []
     model_data = []
-    for ci in num_configurations_for_distribution_test:
+    for ci in xrange(num_configurations_samples_for_distribution_test):
         cdata = true_model.sample_observations_from_single_configuration(
             n=num_samples_for_distribution_test )
-        true_data.extend( list(cdata) )
+        true_data.extend( list(cdata[0]) )
         cdata = model.sample_observations_from_single_configuration(
             n=num_samples_for_distribution_test)
-        model_data.extend( list(cdata) )
+        model_data.extend( list(cdata[0]) )
     true_data = np.array(true_data)
     model_data = np.array(model_data)
 
     # test the samples using Kolmogorov-Smirnov test
+    logger.info( "starting KS test" )
     stat = _multidimenaional_ks_test( true_data, model_data )
 
     return model, stat
@@ -516,6 +587,19 @@ def _ks_all_ops( a, b, ops ):
 ##===================================================================
 ##===================================================================
 ##===================================================================
+
+##
+# A simple 4-cell independent 2-configuration spoon model
+NOISE_SIGMA = 0.1
+SPOON_4CELL_2CONFIGURATION_INDEPENDENT = FiniteConfigurationSpoon(
+    [ ( np.array( [1.0, 1.0, 1.0, 1.0]),
+        np.eye(4) * 0.01 ),
+      ( np.array( [0.0, 1.0, 0.0, 1.0]),
+        np.eye(4) * 0.01 ),
+    ],
+    NOISE_SIGMA )
+
+    
 ##===================================================================
 ##===================================================================
 ##===================================================================
