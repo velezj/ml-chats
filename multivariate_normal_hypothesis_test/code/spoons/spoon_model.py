@@ -270,7 +270,7 @@ def fit_finite_configuration_spoon( data,
         if extrema_prob <= new_configuration_thres:
             ncells = len(x)
             updated_configuration = ( x,
-                                      np.eye( ncells ) * noise_sigma )
+                                      np.eye( ncells ) * noise_sigma * 3 )
             updated_rv = scipy.stats.multivariate_normal(
                 mean = updated_configuration[0],
                 cov = updated_configuration[1] )
@@ -356,6 +356,10 @@ def fit_finite_configuration_spoon( data,
             logger.info( "for datapoint: tracking new configuration" )
 
         else:
+
+            configurations[ updated_cid ] = updated_configuration
+            configurations_data[ updated_cid ] = updated_data
+            crvs[ updated_cid ] = updated_rv
 
             logger.info( "for datapoint: updated ml configuration" )
 
@@ -505,7 +509,7 @@ def _multivariate_normal_extrema_probability(
 def test_fit_algorithm(
         true_model,
         fit_algorithm,
-        num_configurations_samples = 10,
+        num_configurations_samples = 20,
         num_samples_per_configuration = 20,
         num_configurations_samples_for_distribution_test = 10,
         num_samples_for_distribution_test = 30 ):
