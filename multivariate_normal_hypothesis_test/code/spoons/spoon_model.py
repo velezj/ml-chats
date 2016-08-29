@@ -115,6 +115,7 @@ class FiniteConfigurationSpoon( object ):
         self._configuration_rv = scipy.stats.rv_discrete(
             values = ( range(n),
                        self.configuration_weight ) )
+        self.configurations_data = None
 
     ##
     # The number of cells
@@ -130,12 +131,26 @@ class FiniteConfigurationSpoon( object ):
     # if n is None, returns ( single observation, configuration )
     def sample_observations_from_single_configuration( self, n=None ):
 
+        # sample the configuration
+        cid = self._configuration_rv.rvs()
+
+        # generate samples from configuration
+        samples, configuration = self._sample_observations_from_known_configuration( cid, n=n )
+        
+        return samples, configuration
+
+    ##
+    # Sample a set of obsrvations from given known configuration (as id).
+    # This is an internal method, gnerally not used externally since
+    # we generaly want to sample the configuration as well.
+    #
+    # Returns ( samples, configuration )
+    def _sample_observations_from_known_configuration( self, cid, n=None ):
         num = n
         if n is None:
             num = 1
-        
-        # sample the configuration
-        cid = self._configuration_rv.rvs()
+
+        # grab configuration and sample from it
         configuration_rv = self.rvs[ cid ]
         configuration = configuration_rv.rvs()
 
@@ -164,6 +179,11 @@ def fit_configuration_agnostic_spoon( data, noise_sigma=0.1 ):
     mu = np.mean( data, axis = 0 )
     cov = np.cov( data, rowvar=0 )
 
+    # ensure that at least hte covariance diagonals at
+    # noise_sigma or more
+    for i in xrange(cov.shape[0]):
+        cov[i,i] = max( cov[i,i], noise_sigma )
+
     return ConfigurationAgnosticSpoon(
         mu,
         cov,
@@ -178,7 +198,7 @@ def fit_configuration_agnostic_spoon( data, noise_sigma=0.1 ):
 # previously unseen configuration as well as merge any
 # configurations that are too similar.
 #
-# We have two thresholds:
+# We have three thresholds:
 #
 #  The first is to detect when a new data point seems different
 #  enough from any previsouly seen configuration. This is
@@ -204,9 +224,20 @@ def fit_configuration_agnostic_spoon( data, noise_sigma=0.1 ):
 #  the given p-value threhold in order to ensure a strong
 #  guarantee.
 #
+#  The third threshold has to do with the minimum number of elements a
+#  configuration must have, in terms of assigned data samples, before
+#  we try to check if it needs to be merged with other configurations.
+#  This ensures that our hypothesis test has at leasst some varied samples
+#  for each configuration.  The parametr for this is min_samples_to_merge.
+#  If set to 1, we will try to merge given only a single sample.
+#  This will cause a lot of merging since it is very hard to reject
+#  the NULL hypothesis that two means are the same when we only have a
+#  single datapoint for one of them.
+#
 def fit_finite_configuration_spoon( data,
                                     new_configuration_thres = 0.05,
                                     equal_pvalue_thresh = 0.05,
+                                    min_samples_to_merge = 5,
                                     initial_configuration_samples = 10,
                                     noise_sigma = 0.1 ):
 
@@ -299,12 +330,14 @@ def fit_finite_configuration_spoon( data,
         # The NULL hypothesis is they *are* the same, but we can reject this
         # null hypothesis and hence not merge them :-)
         pvalues = []
-        for cid in active_set:
-            pvalue = hypothesis_test_equal_multivariate_normal(
-                configurations_data[ cid ],
-                updated_data )
-            pvalues.append( ( cid, pvalue ) )
-        logger.info( "pvalues: {0}".format( pvalues ) )
+        if len(updated_data) >= min_samples_to_merge:
+            for cid in active_set:
+                pvalue = hypothesis_test_equal_multivariate_normal(
+                    configurations_data[ cid ],
+                    updated_data,
+                    noise_sigma)
+                pvalues.append( ( cid, pvalue ) )
+            logger.info( "pvalues: {0}".format( pvalues ) )
 
         # calculate the bonferoni correction for multiple hypothesis testing
         # since we are actually testing against all previously tracked
@@ -346,7 +379,7 @@ def fit_finite_configuration_spoon( data,
                 equal_pvalue_thresh_bonferoni ) )
 
 
-        elif min_cid is not None and updated_cid >= len(configurations):
+        elif updated_cid >= len(configurations):
 
             # add new configuration
             configurations.append( updated_configuration )
@@ -364,10 +397,12 @@ def fit_finite_configuration_spoon( data,
             logger.info( "for datapoint: updated ml configuration" )
 
     # return the configurations
-    return FiniteConfigurationSpoon(
+    fcs = FiniteConfigurationSpoon(
         configurations,
         noise_sigma,
         configuration_weight = map(float,map(len,configurations_data)))
+    fcs.configurations_data = configurations_data
+    return fcs
 
 ##===================================================================
 ##===================================================================
@@ -386,6 +421,7 @@ def fit_finite_configuration_spoon( data,
 def hypothesis_test_equal_multivariate_normal(
         data0,
         data1,
+        noise_sigma,
         EPS = 1.0e-5):
 
     # we will use Hotelling's T-Square Test for
@@ -416,6 +452,10 @@ def hypothesis_test_equal_multivariate_normal(
         S = np.cov( np.vstack( [ data0, data1] ), rowvar=0 )
     else:
         S = ( ( n0 - 1) * cov0 + ( n1 - 1 ) * cov1 ) / ( n0 + n1 - 2 )
+
+    # ensure at least noise_sigma covariance for diagonal elements
+    for i in xrange(S.shape[0]):
+        S[i,i] = max( S[i,i], noise_sigma )
     
     # the T statistic
     delta = (mean0 - mean1)
@@ -473,7 +513,7 @@ def hypothesis_test_equal_multivariate_normal(
 def _multivariate_normal_extrema_probability(
         mean_cov,
         x,
-        num_samples = 1000 ):
+        num_samples = 10000 ):
 
     mu = np.array(mean_cov[0])
     cov = np.array(mean_cov[1])
@@ -510,7 +550,7 @@ def test_fit_algorithm(
         true_model,
         fit_algorithm,
         num_configurations_samples = 20,
-        num_samples_per_configuration = 20,
+        num_samples_per_configuration = 10,
         num_configurations_samples_for_distribution_test = 10,
         num_samples_for_distribution_test = 30 ):
 
@@ -602,6 +642,36 @@ SPOON_4CELL_2CONFIGURATION_INDEPENDENT = FiniteConfigurationSpoon(
         np.eye(4) * 0.01 ),
     ],
     NOISE_SIGMA )
+
+##
+# Some data for this model
+SAMPLE_DATA_4CELL_2CONFIGURATION = []
+SAMPLE_DATA_4CELL_2CONFIGURATION.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 0, n=10 )[0]) )
+SAMPLE_DATA_4CELL_2CONFIGURATION.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 1, n=10 )[0]) )
+
+##
+# some larger sample data
+SAMPLE_DATA_4CELL_2CONFIGURATION_MEDIUM = []
+SAMPLE_DATA_4CELL_2CONFIGURATION_MEDIUM.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 0, n=15 )[0]) )
+SAMPLE_DATA_4CELL_2CONFIGURATION_MEDIUM.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 1, n=15 )[0]) )
+
+
+##
+# some intrleaved data
+SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE = []
+SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 0, n=10 )[0]) )
+SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 1, n=10 )[0]) )
+SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 0, n=10 )[0]) )
+SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
+    list(SPOON_4CELL_2CONFIGURATION_INDEPENDENT._sample_observations_from_known_configuration( 1, n=10 )[0]) )
+
 
     
 ##===================================================================
