@@ -233,13 +233,18 @@ def fit_configuration_agnostic_spoon( data, noise_sigma=0.1 ):
 #  This will cause a lot of merging since it is very hard to reject
 #  the NULL hypothesis that two means are the same when we only have a
 #  single datapoint for one of them.
+#  As a testing rule-f-thumb try setting this number to 1.5 * num_cells
+#  for the model since the higher the dimensionality of the multivariate
+#  normal, the more samples you need to pool to successfully perform a
+#  hypothesis test :-)
 #
 def fit_finite_configuration_spoon( data,
                                     new_configuration_thres = 0.05,
                                     equal_pvalue_thresh = 0.05,
-                                    min_samples_to_merge = 5,
+                                    min_samples_to_merge = 11,
                                     initial_configuration_samples = 10,
-                                    noise_sigma = 0.1 ):
+                                    noise_sigma = 0.1,
+                                    verbose=True):
 
     # the configurations we are trackin
     configurations = []
@@ -266,9 +271,10 @@ def fit_finite_configuration_spoon( data,
     configurations.append( init_configuration )
     crvs.append( init_rv )
     configurations_data.append( init_data )
-    logger.info( "Fit initial configuration using #{0} data: {1}".format(
-        initial_configuration_samples,
-        init_configuration ) )
+    if verbose:
+        logger.info( "Fit initial configuration using #{0} data: {1}".format(
+            initial_configuration_samples,
+            init_configuration ) )
 
     # ok, process the rest of the data
     for x in data[ initial_configuration_samples: ]:
@@ -287,11 +293,12 @@ def fit_finite_configuration_spoon( data,
         # the set of configurations to test against
         active_set = set(xrange(len(configurations)))
 
-        logger.info( "tracking #{0}: max lik={1} for conf {2}, prob={3}".format(
-            len(configurations),
-            np.max(liks),
-            ml_cid,
-            extrema_prob ) )
+        if verbose:
+            logger.info( "tracking #{0}: max lik={1} for conf {2}, prob={3}".format(
+                len(configurations),
+                np.max(liks),
+                ml_cid,
+                extrema_prob ) )
 
         # if the extrema probability is too low, make a new configuration
         updated_configuration = None
@@ -308,8 +315,9 @@ def fit_finite_configuration_spoon( data,
             updated_data = np.array( [ x ] )
             updated_cid = len(configurations)
 
-            logger.info( "  trying new configuration: {0}".format(
-                updated_configuration ))
+            if verbose:
+                logger.info( "  trying new configuration: {0}".format(
+                    updated_configuration ))
 
         else:
             
@@ -320,9 +328,11 @@ def fit_finite_configuration_spoon( data,
             active_set -= { ml_cid }
             updated_cid = ml_cid
 
-            logger.info( "  adding to ml configuration")
+            if verbose:
+                logger.info( "  adding to ml configuration")
 
-        logger.info( "active set: {0}".format( active_set ) )
+        if verbose:
+            logger.info( "active set: {0}".format( active_set ) )
 
         # see if we have to join any of our configurations because they
         # are actually the same
@@ -335,9 +345,11 @@ def fit_finite_configuration_spoon( data,
                 pvalue = hypothesis_test_equal_multivariate_normal(
                     configurations_data[ cid ],
                     updated_data,
-                    noise_sigma)
+                    noise_sigma,
+                    verbose=verbose)
                 pvalues.append( ( cid, pvalue ) )
-            logger.info( "pvalues: {0}".format( pvalues ) )
+            if verbose:
+                logger.info( "pvalues: {0}".format( pvalues ) )
 
         # calculate the bonferoni correction for multiple hypothesis testing
         # since we are actually testing against all previously tracked
@@ -372,11 +384,12 @@ def fit_finite_configuration_spoon( data,
                 del configurations_data[ updated_cid]
                 del crvs[ updated_cid]
 
-            logger.info( "for datapoint: Merging {0} with {1}: pvalue {2} > {3}".format(
-                updated_cid,
-                max_cid,
-                min_pvalue,
-                equal_pvalue_thresh_bonferoni ) )
+            if verbose:
+                logger.info( "for datapoint: Merging {0} with {1}: pvalue {2} > {3}".format(
+                    updated_cid,
+                    max_cid,
+                    min_pvalue,
+                    equal_pvalue_thresh_bonferoni ) )
 
 
         elif updated_cid >= len(configurations):
@@ -386,7 +399,8 @@ def fit_finite_configuration_spoon( data,
             configurations_data.append( updated_data )
             crvs.append( updated_rv )
 
-            logger.info( "for datapoint: tracking new configuration" )
+            if verbose:
+                logger.info( "for datapoint: tracking new configuration" )
 
         else:
 
@@ -394,7 +408,8 @@ def fit_finite_configuration_spoon( data,
             configurations_data[ updated_cid ] = updated_data
             crvs[ updated_cid ] = updated_rv
 
-            logger.info( "for datapoint: updated ml configuration" )
+            if verbose:
+                logger.info( "for datapoint: updated ml configuration" )
 
     # return the configurations
     fcs = FiniteConfigurationSpoon(
@@ -422,7 +437,9 @@ def hypothesis_test_equal_multivariate_normal(
         data0,
         data1,
         noise_sigma,
-        EPS = 1.0e-5):
+        EPS = 1.0e-5,
+        assume_independence = True,
+        verbose = True):
 
     # we will use Hotelling's T-Square Test for
     # equal multivariate normal means.
@@ -456,6 +473,13 @@ def hypothesis_test_equal_multivariate_normal(
     # ensure at least noise_sigma covariance for diagonal elements
     for i in xrange(S.shape[0]):
         S[i,i] = max( S[i,i], noise_sigma )
+
+    # kill covariance off-diagonal terms if we are assuming independence
+    if assume_independence:
+        for i in xrange(S.shape[0]):
+            for j in xrange(S.shape[1]):
+                if i != j:
+                    S[i,j] = 0.0
     
     # the T statistic
     delta = (mean0 - mean1)
@@ -486,13 +510,14 @@ def hypothesis_test_equal_multivariate_normal(
     # make sure survival is finite
     if not np.isfinite( survival ):
         survival = 0.0
-    logger.info( "  delta: {0}, T2:{1}, F:{2}, surv:{3} n={4},{5}".format(
-        delta,
-        T2,
-        F,
-        survival,
-        n0,
-        n1) )
+    if verbose:
+        logger.info( "  delta: {0}, T2:{1}, F:{2}, surv:{3} n={4},{5}".format(
+            delta,
+            T2,
+            F,
+            survival,
+            n0,
+            n1) )
     
     # return the survival rate for the given value (so how extreme the value is)
     # this is a p-value, so a return of < 0.05 means that we could reject
@@ -508,31 +533,53 @@ def hypothesis_test_equal_multivariate_normal(
 # By extreme we take it to mean values further from the mean in
 # eucledean space.
 #
-# We perform monte-carlo integration to compute the probability
-# of generating values further than x.
+# We use the chi^2 distribution as the confidence interval of
+# the distance from the mean.
+#
+# We could also perform monte-carlo integration to compute the probability
+# of generating values further than x, but this is slower :-)
 def _multivariate_normal_extrema_probability(
         mean_cov,
         x,
-        num_samples = 10000 ):
+        num_samples_per_dimension = 100,
+        EPS = 1.0e-5):
 
+    ##
+    # use the chi^2 distribution :=)
     mu = np.array(mean_cov[0])
-    cov = np.array(mean_cov[1])
-    rv = scipy.stats.multivariate_normal( mean=mu,
-                                          cov=cov )
+    cov = mean_cov[1]
+    k = len(mu)
+    try:
+        cov_inv = np.linalg.inv( cov )
+    except np.linalg.LinAlgError as le:
+        cov_inv = np.linalg.inv( cov + np.eye( k ) * np.random.random(EPS) )
+    delta = np.array(x) - mu
+    d = np.dot( delta,
+                np.dot( cov_inv,
+                        delta ) )
+    survival = scipy.stats.chi2( k ).sf( d )
+    return survival
 
-    # ok, do monte-carlo integration by taking samples and just
-    # counting how many lie further from mean that x
-    x_dist = np.linalg.norm( mu - x )
-    samples = rv.rvs( size=num_samples )
-    num_further = 0
-    for s in samples:
-        s_dist = np.linalg.norm( s - mu )
-        if s_dist > x_dist:
-            num_further += 1
 
-    # ok, return probability of being further than x
-    p = float(num_further) / num_samples
-    return p
+    # num_samples = num_samples_per_dimension * len(x)
+    # mu = np.array(mean_cov[0])
+    # cov = np.array(mean_cov[1])
+    # rv = scipy.stats.multivariate_normal( mean=mu,
+    #                                       cov=cov )
+
+    # # ok, do monte-carlo integration by taking samples and just
+    # # counting how many lie further from mean that x
+    # x_dist = np.linalg.norm( mu - x )
+    # samples = rv.rvs( size=num_samples )
+    # num_further = 0
+    # for s in samples:
+    #     s_dist = np.linalg.norm( s - mu )
+    #     if s_dist > x_dist:
+    #         num_further += 1
+
+    # # ok, return probability of being further than x
+    # p = float(num_further) / num_samples
+    # return p
 
 ##===================================================================
 ##===================================================================
@@ -579,8 +626,9 @@ def test_fit_algorithm(
     model_data = np.array(model_data)
 
     # test the samples using Kolmogorov-Smirnov test
-    logger.info( "starting KS test" )
-    stat = _multidimenaional_ks_test( true_data, model_data )
+    #logger.info( "starting KS test" )
+    stat = None
+    #stat = _multidimenaional_ks_test( true_data, model_data )
 
     return model, stat
         
@@ -643,6 +691,33 @@ SPOON_4CELL_2CONFIGURATION_INDEPENDENT = FiniteConfigurationSpoon(
     ],
     NOISE_SIGMA )
 
+
+##
+# A simple 10-cell independent 2-configuration spoon model
+SPOON_10CELL_2CONFIGURATION_INDEPENDENT = FiniteConfigurationSpoon(
+    [ ( np.array( [1.0] * 10 ),
+        np.eye(10) * 0.01 ),
+      ( np.array( [0.0, 1.0] * 5),
+        np.eye(10) * 0.01 ),
+    ],
+    NOISE_SIGMA )
+
+
+##
+# A 10-cell independent 4-configuration spoon model
+SPOON_10CELL_4CONFIGURATION_INDEPENDENT = FiniteConfigurationSpoon(
+    [ ( np.array( [1.0] * 10 ),
+        np.eye(10) * 0.01 ),
+      ( np.array( [0.0, 1.0] * 5),
+        np.eye(10) * 0.01 ),
+      ( np.array( [0.0] * 5 + [1.0] * 5 ),
+        np.eye(10) * 0.01 ),
+      ( np.array( [1.0] * 5 + [0.0] * 5 ),
+        np.eye(10) * 0.01 ),    
+    ],
+    NOISE_SIGMA )
+
+
 ##
 # Some data for this model
 SAMPLE_DATA_4CELL_2CONFIGURATION = []
@@ -678,6 +753,66 @@ SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
 ##===================================================================
 ##===================================================================
 ##===================================================================
+
+def test_increasing_cell_performance(
+        min_cells = 10,
+        max_cells = 10000,
+        cell_step_factor = 10.0,
+        cell_min_sample_factor = 1.5,
+        noise_sigma = 0.1,
+        configuration_sigma = 0.01 ):
+
+    results = []
+
+    # iterate over num cells
+    num_cells = min_cells
+    while num_cells <= max_cells:
+
+        # generate *true* 4-configuration model
+        true_model_configurations = []
+        true_model_configurations.append(
+            ( np.array( [1.0] * num_cells ),
+              np.eye( num_cells ) * configuration_sigma ) )
+        interleave = [0.0, 1.0] * int((num_cells+1)/2)
+        interleave = interleave[:num_cells]
+        true_model_configurations.append(
+            ( np.array( interleave ),
+              np.eye( num_cells ) * configuration_sigma ) )
+        na = num_cells / 2
+        nb = num_cells - na
+        true_model_configurations.append(
+            ( np.array( [0.0] * na + [1.0] * nb ),
+              np.eye( num_cells ) * configuration_sigma ) )
+        true_model_configurations.append(
+            ( np.array( [1.0] * na + [0.0] * nb ),
+              np.eye( num_cells ) * configuration_sigma ) )
+        true_model = FiniteConfigurationSpoon(
+            true_model_configurations,
+            noise_sigma )
+
+
+        # ok, test the fit
+        fit_model, fit_stat = test_fit_algorithm(
+            true_model,
+            lambda data: fit_finite_configuration_spoon(
+                data,
+                min_samples_to_merge = int(num_cells * cell_min_sample_factor),
+                noise_sigma = noise_sigma,
+                verbose = False),
+            num_samples_per_configuration = int(num_cells * cell_min_sample_factor * 3) )
+
+        # add to result
+        results.append( fit_model )
+
+        logger.info( "[{0}]: found {1} configurations".format(
+            num_cells,
+            len(fit_model.mu_covs) ) )
+
+        # increase num cells
+        num_cells = int( num_cells * cell_step_factor )
+
+    return results
+        
 ##===================================================================
 ##===================================================================
 ##===================================================================
