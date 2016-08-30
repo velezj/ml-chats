@@ -245,6 +245,7 @@ def fit_finite_configuration_spoon( data,
                                     min_power_to_merge = 0.90,
                                     initial_configuration_samples = 10,
                                     noise_sigma = 0.1,
+                                    assume_independence = True,
                                     verbose=True):
 
     # the configurations we are trackin
@@ -278,7 +279,12 @@ def fit_finite_configuration_spoon( data,
             init_configuration ) )
 
     # ok, process the rest of the data
-    for x in data[ initial_configuration_samples: ]:
+    for i, x in enumerate(data[ initial_configuration_samples: ]):
+
+        if (i + 1) % 100 == 0:
+            logger.info( "  [{0} / {1}] fitting data".format(
+                i,
+                len(data) ))
 
         # first, choose the configuration which has the max likelihood
         # for this data point
@@ -289,7 +295,8 @@ def fit_finite_configuration_spoon( data,
         # (the probability to seeing a data point further than the given)
         extrema_prob = _multivariate_normal_extrema_probability(
             configurations[ ml_cid ],
-            x )
+            x,
+            assume_independence = assume_independence )
 
         # the set of configurations to test against
         active_set = set(xrange(len(configurations)))
@@ -347,6 +354,8 @@ def fit_finite_configuration_spoon( data,
                     configurations_data[ cid ],
                     updated_data,
                     noise_sigma,
+                    stat_alpha = equal_pvalue_thresh,
+                    assume_independence = assume_independence,
                     verbose=verbose)
                 if power >= min_power_to_merge:
                     pvalues.append( ( cid, pvalue, power) )
@@ -494,12 +503,20 @@ def hypothesis_test_equal_multivariate_normal(
     
     # the T statistic
     delta = (mean0 - mean1)
-    try:
-        Sinv = np.linalg.inv( S )
-    except np.linalg.LinAlgError as le:
-        # probabily S was wingular, add some noise
-        S += ( np.eye( S.shape[0] ) * np.random.random(size=S.shape[0]) * EPS )
-        Sinv = np.linalg.inv( S )
+    if assume_independence:
+        Sinv = S
+        for i in xrange(S.shape[0]):
+            if Sinv[i,i] == 0:
+                Sinv[ i,i ] = 1.0 / EPS
+            else:
+                Sinv[ i,i ] = 1.0 / Sinv[i,i]
+    else:
+        try:
+            Sinv = np.linalg.inv( S )
+        except np.linalg.LinAlgError as le:
+            # probabily S was wingular, add some noise
+            S += ( np.eye( S.shape[0] ) * np.random.random(size=S.shape[0]) * EPS )
+            Sinv = np.linalg.inv( S )
     dSd = np.dot( np.dot( delta, Sinv ),
                   delta )
     T2 = dSd * float( n0 * n1 ) / ( n0 + n1 )
@@ -524,7 +541,11 @@ def hypothesis_test_equal_multivariate_normal(
 
     # calculate power of test at critical value stat_alpha
     if n0 + n1 - num_vars - 1 > 0:
-        power = np.sqrt(T2) - np.sqrt( ( (n0 + n1 - 2.0) * num_vars) / (n0 + n1 - num_vars - 1.0) * scipy.stats.f(num_vars, n0 + n1 - num_vars - 1).ppf( 1.0 - stat_alpha ) )
+        critical_F = scipy.stats.f( num_vars, n0 + n1 - num_vars - 1 ).ppf( 1.0 - stat_alpha )
+        prob_reject_if_h1 = scipy.stats.ncf( num_vars,
+                                             n0 + n1 - num_vars - 1,
+                                             T2 ).sf( critical_F )
+        power = prob_reject_if_h1
     else:
         power = 0.0
 
@@ -560,18 +581,26 @@ def hypothesis_test_equal_multivariate_normal(
 def _multivariate_normal_extrema_probability(
         mean_cov,
         x,
-        num_samples_per_dimension = 100,
-        EPS = 1.0e-5):
+        EPS = 1.0e-5,
+        assume_independence = True):
 
     ##
     # use the chi^2 distribution :=)
     mu = np.array(mean_cov[0])
     cov = mean_cov[1]
     k = len(mu)
-    try:
-        cov_inv = np.linalg.inv( cov )
-    except np.linalg.LinAlgError as le:
-        cov_inv = np.linalg.inv( cov + np.eye( k ) * np.random.random(EPS) )
+    if assume_independence:
+        cov_inv = cov
+        for i in xrange(cov.shape[0]):
+            if cov_inv[i,i] == 0:
+                cov_inv = 1.0 / EPS
+            else:
+                cov_inv[i,i] = 1.0 / cov_inv[i,i]
+    else:
+        try:
+            cov_inv = np.linalg.inv( cov )
+        except np.linalg.LinAlgError as le:
+            cov_inv = np.linalg.inv( cov + np.eye( k ) * np.random.random(EPS) )
     delta = np.array(x) - mu
     d = np.dot( delta,
                 np.dot( cov_inv,
@@ -775,13 +804,18 @@ SAMPLE_DATA_4CELL_2CONFIGURATION_INTERLEAVE.extend(
 
 def test_increasing_cell_performance(
         min_cells = 10,
-        max_cells = 10000,
+        max_cells = 1000,
+        num_iterations_per_cells = 5,
         cell_step_factor = 10.0,
-        cell_min_sample_factor = 1.5,
+        cell_min_sample_factor = 0.0,
+        cell_min_sample_offset = 3.0,
+        data_samples_factor = 0.3,
+        data_samples_offset = 11,
+        min_power_to_merge = 0.75,
         noise_sigma = 0.1,
         configuration_sigma = 0.01 ):
 
-    results = []
+    results = {}
 
     # iterate over num cells
     num_cells = min_cells
@@ -810,22 +844,27 @@ def test_increasing_cell_performance(
             noise_sigma )
 
 
-        # ok, test the fit
-        fit_model, fit_stat = test_fit_algorithm(
-            true_model,
-            lambda data: fit_finite_configuration_spoon(
-                data,
-                min_samples_to_merge = int(num_cells * cell_min_sample_factor),
-                noise_sigma = noise_sigma,
-                verbose = False),
-            num_samples_per_configuration = int(num_cells * cell_min_sample_factor * 3) )
+        for iteration in xrange(num_iterations_per_cells):
 
-        # add to result
-        results.append( fit_model )
+            # ok, test the fit
+            fit_model, fit_stat = test_fit_algorithm(
+                true_model,
+                lambda data: fit_finite_configuration_spoon(
+                    data,
+                    min_samples_to_merge = int(num_cells * cell_min_sample_factor + cell_min_sample_offset),
+                    min_power_to_merge = min_power_to_merge,
+                    noise_sigma = noise_sigma,
+                    verbose = False),
+                num_samples_per_configuration = int(num_cells * data_samples_factor + data_samples_offset) )
 
-        logger.info( "[{0}]: found {1} configurations".format(
-            num_cells,
-            len(fit_model.mu_covs) ) )
+            # add to result
+            if num_cells not in results:
+                results[ num_cells ] = []
+            results[num_cells].append( fit_model )
+
+            logger.info( "[{0}]: found {1} configurations".format(
+                num_cells,
+                len(fit_model.mu_covs) ) )
 
         # increase num cells
         num_cells = int( num_cells * cell_step_factor )
