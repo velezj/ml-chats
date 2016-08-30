@@ -242,6 +242,7 @@ def fit_finite_configuration_spoon( data,
                                     new_configuration_thres = 0.05,
                                     equal_pvalue_thresh = 0.05,
                                     min_samples_to_merge = 11,
+                                    min_power_to_merge = 0.90,
                                     initial_configuration_samples = 10,
                                     noise_sigma = 0.1,
                                     verbose=True):
@@ -342,12 +343,13 @@ def fit_finite_configuration_spoon( data,
         pvalues = []
         if len(updated_data) >= min_samples_to_merge:
             for cid in active_set:
-                pvalue = hypothesis_test_equal_multivariate_normal(
+                pvalue, power = hypothesis_test_equal_multivariate_normal(
                     configurations_data[ cid ],
                     updated_data,
                     noise_sigma,
                     verbose=verbose)
-                pvalues.append( ( cid, pvalue ) )
+                if power >= min_power_to_merge:
+                    pvalues.append( ( cid, pvalue, power) )
             if verbose:
                 logger.info( "pvalues: {0}".format( pvalues ) )
 
@@ -362,12 +364,13 @@ def fit_finite_configuration_spoon( data,
         # normal closest to ours)
         min_cid = None
         min_pvalue = -np.inf
+        min_power = None
         if len(pvalues) > 0:
-            min_cid, min_pvalue = sorted( pvalues, key=lambda (c,p): p )[0]
+            min_cid, min_pvalue, min_power = sorted( pvalues, key=lambda (c,p,w): p )[0]
         if min_cid is not None and min_pvalue > equal_pvalue_thresh_bonferoni:
 
             # we are merging, find maximum p-value
-            max_cid, max_pvalue = sorted( pvalues, key=lambda (c,p): p )[-1]
+            max_cid, max_pvalue, max_power = sorted( pvalues, key=lambda (c,p,w): p )[-1]
             
 
             # merge
@@ -385,11 +388,12 @@ def fit_finite_configuration_spoon( data,
                 del crvs[ updated_cid]
 
             if verbose:
-                logger.info( "for datapoint: Merging {0} with {1}: pvalue {2} > {3}".format(
+                logger.info( "for datapoint: Merging {0} with {1}: pvalue {2} > {3}, power={4}".format(
                     updated_cid,
                     max_cid,
                     min_pvalue,
-                    equal_pvalue_thresh_bonferoni ) )
+                    equal_pvalue_thresh_bonferoni,
+                    min_power ) )
 
 
         elif updated_cid >= len(configurations):
@@ -400,7 +404,9 @@ def fit_finite_configuration_spoon( data,
             crvs.append( updated_rv )
 
             if verbose:
-                logger.info( "for datapoint: tracking new configuration" )
+                logger.info( "for datapoint: tracking new configuration, pvalue={0}, power={1}".format(
+                    min_pvalue,
+                    min_power ) )
 
         else:
 
@@ -409,7 +415,9 @@ def fit_finite_configuration_spoon( data,
             crvs[ updated_cid ] = updated_rv
 
             if verbose:
-                logger.info( "for datapoint: updated ml configuration" )
+                logger.info( "for datapoint: updated ml configuration, pvalue={0}, power={1}".format(
+                    min_pvalue,
+                    min_power ) )
 
     # return the configurations
     fcs = FiniteConfigurationSpoon(
@@ -433,10 +441,13 @@ def fit_finite_configuration_spoon( data,
 # Equal covariance is *assumed* and same mean is tested!
 #
 # The return value is a p-value to reject the HULL hypothesis
+#   we also return the *power* of the test for the given sample
+#   size and statistic threshold alpha
 def hypothesis_test_equal_multivariate_normal(
         data0,
         data1,
         noise_sigma,
+        stat_alpha = 0.05,
         EPS = 1.0e-5,
         assume_independence = True,
         verbose = True):
@@ -489,9 +500,9 @@ def hypothesis_test_equal_multivariate_normal(
         # probabily S was wingular, add some noise
         S += ( np.eye( S.shape[0] ) * np.random.random(size=S.shape[0]) * EPS )
         Sinv = np.linalg.inv( S )
-    T2 = np.dot( np.dot( delta, Sinv ),
-                 delta )
-    T2 *= float( n0 * n1 ) / ( n0 + n1 )
+    dSd = np.dot( np.dot( delta, Sinv ),
+                  delta )
+    T2 = dSd * float( n0 * n1 ) / ( n0 + n1 )
     T2 = np.abs( T2 )
 
     # form into F statistic
@@ -510,20 +521,28 @@ def hypothesis_test_equal_multivariate_normal(
     # make sure survival is finite
     if not np.isfinite( survival ):
         survival = 0.0
+
+    # calculate power of test at critical value stat_alpha
+    if n0 + n1 - num_vars - 1 > 0:
+        power = np.sqrt(T2) - np.sqrt( ( (n0 + n1 - 2.0) * num_vars) / (n0 + n1 - num_vars - 1.0) * scipy.stats.f(num_vars, n0 + n1 - num_vars - 1).ppf( 1.0 - stat_alpha ) )
+    else:
+        power = 0.0
+
     if verbose:
-        logger.info( "  delta: {0}, T2:{1}, F:{2}, surv:{3} n={4},{5}".format(
+        logger.info( "  delta: {0}, T2:{1}, F:{2}, surv:{3}, power={6} n={4},{5}".format(
             delta,
             T2,
             F,
             survival,
             n0,
-            n1) )
+            n1,
+            power) )
     
     # return the survival rate for the given value (so how extreme the value is)
     # this is a p-value, so a return of < 0.05 means that we could reject
     # the NULL hypothesis that data came from same means since the chance
     # is less than 5% of seeing the given data from same means.
-    return survival
+    return survival, power
 
 ##===================================================================
 
