@@ -257,7 +257,63 @@ class Bounded1dTwoGuassiansScenerio( Scenario ):
             samples.append( [x] )
         return samples
     
+
+
+##======================================================================
+
+##
+# A test scenario with two multidimensional normal distributions
+class BoundedTwoGuassiansScenerio( Scenario ):
+
+    def __init__( self,
+                  bounds,
+                  mean_a,
+                  cov_a,
+                  mean_b,
+                  cov_b,
+                  lipschitz_k):
+        self.bounds = bounds
+        self.lower_bounds = np.array(map(lambda (l,u): l, bounds))
+        self.upper_bounds = np.array(map(lambda (l,u): u, bounds))
+        self.mean_a = mean_a
+        self.cov_a = cov_a
+        self.mean_b = mean_b
+        self.cov_b = cov_b
+        self._lipschitz_k = lipschitz_k
+        self._domain = BoundedDomain( bounds )
+        self.rv_a = scipy.stats.multivariate_normal( mean_a, cov_a )
+        self.rv_b = scipy.stats.multivariate_normal( mean_b, cov_b )
         
+
+    def domain(self):
+        return self._domain
+
+    def lipschitz_k(self):
+        return self._lipschitz_k
+
+    def sample_from_a(self,n):
+        samples = []
+        for i in xrange( n ):
+
+            x = self.rv_a.rvs()
+            while np.any(x < self.lower_bounds) or np.any(x >= self.upper_bounds):
+                x = self.rv_a.rvs()
+
+            samples.append( x )
+        return samples
+
+    def sample_from_b(self,n):
+        samples = []
+        for i in xrange( n ):
+
+            x = self.rv_b.rvs()
+            while np.any(x < self.lower_bounds) or np.any(x >= self.upper_bounds):
+                x = self.rv_b.rvs()
+
+            samples.append( [x] )
+        return samples
+    
+
 
 ##======================================================================
 ##======================================================================
@@ -282,9 +338,78 @@ def test_scenario( S, N, delta ):
 
 ##======================================================================
 ##======================================================================
+
+##
+# compute domain from samples
+def compute_domain_from_samples( samples ):
+    sa = np.array( samples )
+    mins = np.min( sa, axis=0 )
+    maxs = np.max( sa, axis=0 )
+    return BoundedDomain( zip( mins, maxs ) )
+
+
+##======================================================================
+
+##
+# rough estimate of lipschitz_k which just takes the maximum
+# seen derivative :-)
+def rough_lipschitz_k( samples, bandwidth=None, num_samples_per_dimension = 10, EPS=1.0e-5 ):
+
+    # estimate a distribution from samples using
+    # kernel density estimation (guassian kernel)
+    sa = np.array(samples)
+    try:
+        kde = scipy.stats.gaussian_kde( sa.transpose() )
+    except np.linalg.LinAlgError as le:
+        sa += np.random.random( size=sa.shape ) * EPS
+        kde = scipy.stats.gaussian_kde( sa.transpose() )
+
+    # densly sample the domain to approximate derivatives
+    domain = compute_domain_from_samples( samples )
+    subds = domain.subdivide_into_compact_nonoverlapping( num_samples_per_dimension )
+    derivative_x = np.array(map(lambda d: np.mean( d.lower_upper_bounds, axis=1 ), subds ))
+    N = len(derivative_x)
+
+    # ok, now compute largest derivative
+    p_x = kde.pdf( derivative_x.transpose() )
+    derivs = []
+    for i in xrange( N ):
+        for j in xrange( N ):
+            p_diff = abs(p_x[j] - p_x[i])
+            x_diff = np.linalg.norm( derivative_x[i] - derivative_x[j] )
+            if x_diff != 0:
+                d = p_diff / x_diff
+                derivs.append( d )
+
+    # find max derivative
+    return max( derivs )
+
+
 ##======================================================================
 ##======================================================================
-##======================================================================
+
+def approximate_bayes_error_rate_using_only_samples(
+        samples_a,
+        samples_b,
+        delta ):
+
+    # compute domain and rough lipschitz_k
+    samples_a = np.array( samples_a )
+    samples_b = np.array( samples_b )
+    domain = compute_domain_from_samples( np.vstack( [ samples_a, samples_b ] ) )
+    lipschitz_a = rough_lipschitz_k( samples_a )
+    lipschitz_b = rough_lipschitz_k( samples_b )
+    lipschitz_k = max( lipschitz_a, lipschitz_b )
+
+    ber = approximate_bayes_error_rate(
+        samples_a,
+        samples_b,
+        domain,
+        lipschitz_k,
+        delta )
+
+    return ber, lipschitz_k, domain 
+
 ##======================================================================
 ##======================================================================
 ##======================================================================
