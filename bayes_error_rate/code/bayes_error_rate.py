@@ -4,6 +4,7 @@ logger = logging.getLogger()
 import itertools
 import numpy as np
 import scipy.stats
+from fastkde import fastKDE
 
 ##======================================================================
 
@@ -16,6 +17,8 @@ class Domain(object):
     def domain_size(self):
         raise NotImplementedError()
     def subdivide_into_compact_nonoverlapping(self, T):
+        raise NotImplementedError()
+    def subdomain_for_point( self, T, x ):
         raise NotImplementedError()
 
 ##======================================================================
@@ -53,7 +56,15 @@ class BoundedDomain(object):
                 uls.append( ( lower, upper ) )
             subs.append( BoundedDomain( uls ) )
         return subs
-    
+    def subdomain_for_point(self, T, x ):
+        subd = []
+        for (l,u), y in zip(self.lower_upper_bounds,x):
+            step = float(u - l) / T
+            b = int(np.floor( (y - l) / step ))
+            bl = b * step
+            bu = (b+1) * step
+            subd.append( (bl,bu) )
+        return BoundedDomain( subd )
 
 ##======================================================================
 ##======================================================================
@@ -84,28 +95,24 @@ def approximate_bayes_error_rate(
 
     # ok, divive domain in non-overlapping subdomains
     T = int(np.ceil(np.power( N, 0.25 )))
-    subdomains = domain.subdivide_into_compact_nonoverlapping( T )
 
     # ok, compute emprirical counts in each subdomain
     empirical_a = {}
     empirical_b = {}
     for a in samples_a:
-        for dom in subdomains:
-            if dom.is_inside( a ):
-                if dom not in empirical_a:
-                    empirical_a[ dom ] = 0.0
-                empirical_a[ dom ] += (1.0 / N)
-                break
+        dom = domain.subdomain_for_point( T, a )
+        if dom not in empirical_a:
+            empirical_a[ dom ] = 0.0
+        empirical_a[ dom ] += (1.0 / N)
     for b in samples_b:
-        for dom in subdomains:
-            if dom.is_inside( b ):
-                if dom not in empirical_b:
-                    empirical_b[ dom ] = 0.0
-                empirical_b[ dom ] += (1.0 / N)
-                break
-
+        dom = domain.subdomain_for_point(T, b)
+        if dom not in empirical_b:
+            empirical_b[ dom ] = 0.0
+        empirical_b[ dom ] += (1.0 / N)
+        
     # compute empirical bayes error rate
     empirical_ber = 0.0
+    subdomains = set( empirical_a.keys() + empirical_b.keys() )
     for dom in subdomains:
         pa = empirical_a.get( dom, 0.0 )
         pb = empirical_b.get( dom, 0.0 )
@@ -353,7 +360,94 @@ def compute_domain_from_samples( samples ):
 ##
 # rough estimate of lipschitz_k which just takes the maximum
 # seen derivative :-)
-def rough_lipschitz_k( samples, bandwidth=None, num_samples_per_dimension = 10, EPS=1.0e-5 ):
+def rough_lipschitz_k( samples, EPS=1.0e-5 ):
+            
+    # estimate a distribution from samples using
+    # kernel density estimation (guassian kernel)
+    N = len(samples)
+    sa = np.array(samples).reshape( (N,-1) )
+    sa += np.random.random( size=sa.shape ) * EPS
+    D = sa.shape[1]
+
+    # grab individual dimensoins
+    sa_dims = []
+    for i in xrange(sa.shape[1]):
+        sa_dims.append( sa[:,i] )
+    kde_pdf, kde_axes = fastKDE.pdf( *sa_dims )
+    if D == 1:
+        kde_axes = [ kde_axes ]
+
+    # now compute max derivative
+    max_deriv = None
+    it1 = np.nditer(kde_pdf,flags=['multi_index'])
+    while not it1.finished:
+        it2 = np.nditer(kde_pdf,flags=['multi_index'])
+        while not it2.finished:
+
+            # grab indices and pdf
+            idx1 = it1.multi_index    
+            p1 = it1.value
+            idx2 = it2.multi_index
+            p2 = it2.value
+
+            # compute x from indices and axes
+            x1 = np.array( map(lambda i,a: a[i], idx1, kde_axes))
+            x2 = np.array( map(lambda i,a: a[i], idx2, kde_axes))
+
+            # x distance
+            diff_x = np.linalg.norm( x1 - x2, ord=1 )
+            diff_p = abs( p1 - p2 )
+            if diff_x != 0:
+                deriv = diff_p / diff_x
+                if max_deriv is None or deriv > max_deriv:
+                    max_deriv = deriv
+            
+            it2.iternext()
+        it1.iternext()
+
+    return max_deriv
+
+
+##======================================================================
+
+##
+# rough estimate of lipschitz_k which just takes the maximum
+# seen derivative :-)
+def rough_lipschitz_k_slow( samples ):
+            
+    # estimate a distribution from samples using
+    # kernel density estimation (guassian kernel)
+    N = len(samples)
+    sa = np.array(samples).reshape( (N,-1) )
+    sa += np.random.random( size=sa.shape ) * EPS
+    kde = scipy.stats.gaussian_kde( sa.transpose() )
+
+    # now just compute pdf at each sample x
+    pdf_x = kde.pdf( sa.transpose() )
+
+    # now compute max derivative
+    max_deriv = None
+    for i in xrange(sa.shape[0]):
+        for j in xrange(sa.shape[0]):
+            xi = sa[i]
+            xj = sa[j]
+            diff_p = abs( pdf_x[i] - pdf_x[j] )
+            diff_x = np.linalg.norm( xi - xj, ord=1 )
+            if diff_x == 0:
+                continue
+            deriv = diff_p / diff_x
+            if max_deriv is None or deriv > max_deriv:
+                max_deriv = deriv
+    return deriv
+
+
+##======================================================================
+
+
+##
+# Estimate lipschitz_k by computing a kernel density estimation for
+# the sampels and taking the lipschitz_k for hte resulting kde
+def kde_lipschitz_k( samples, bandwidth=None, num_samples_per_dimension = 10, EPS=1.0e-5 ):
 
     # estimate a distribution from samples using
     # kernel density estimation (guassian kernel)
@@ -376,7 +470,7 @@ def rough_lipschitz_k( samples, bandwidth=None, num_samples_per_dimension = 10, 
     for i in xrange( N ):
         for j in xrange( N ):
             p_diff = abs(p_x[j] - p_x[i])
-            x_diff = np.linalg.norm( derivative_x[i] - derivative_x[j] )
+            x_diff = np.linalg.norm( derivative_x[i] - derivative_x[j], ord=1 )
             if x_diff != 0:
                 d = p_diff / x_diff
                 derivs.append( d )
